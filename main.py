@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 from threading import Thread
 import pandas as pd
+import os
 import uvicorn
 import secrets
 import logging
@@ -172,4 +173,5 @@ def client_page_default():
     return FileResponse(html_file)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

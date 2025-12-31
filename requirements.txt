@@ -8,3 +8,4 @@ chromedriver-autoinstaller
 python-multipart
 requests
 python-dotenv
+gunicorn

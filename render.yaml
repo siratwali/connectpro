@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: linkedin-auto-connect
+    runtime: python3
+    startCommand: "gunicorn main:app --workers 1 --worker-class uvicorn.workers.UvicornWorker"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11
+      - key: PYTHONUNBUFFERED
+        value: "1"
