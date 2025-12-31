@@ -1,28 +1,30 @@
 """
-LinkedIn Auto Connect Pro - FastAPI Backend with CSV Upload
-Your linkedin_bot.py + File Upload Support
+LinkedIn Auto Connect Pro - FastAPI Backend with Activity Logging
 """
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import EmailStr
+from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
-import pandas as pd
-import json
-from datetime import datetime
-import secrets
 from threading import Thread
+import pandas as pd
+import uvicorn
+import secrets
 import logging
-
-# Import your backend
 import linkedin_bot
+import time
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ==================== DIRECTORIES ====================
+BASE_DIR = Path(__file__).parent
+PUBLIC_DIR = BASE_DIR / "public"
+UPLOADS_DIR = BASE_DIR / "uploads"
+UPLOADS_DIR.mkdir(exist_ok=True)
+
+# ==================== APP INIT ====================
 app = FastAPI(
     title="LinkedIn Auto Connect Pro",
     description="Share this link with clients",
@@ -38,41 +40,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================== PATHS ====================
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
-UPLOADS_DIR = Path("uploads")
-UPLOADS_DIR.mkdir(exist_ok=True)
-CLIENTS_FILE = Path("clients_registry.json")
+# ==================== JOBS STORAGE ====================
+# Track multiple CSV processing tasks with activity log
+JOBS = {}
 
-# ==================== HELPER FUNCTIONS ====================
+# ==================== ENDPOINTS ====================
 
-def load_clients():
-    """Load clients from JSON"""
-    if CLIENTS_FILE.exists():
-        with open(CLIENTS_FILE, 'r') as f:
-            return json.load(f)
-    return {}
+@app.get("/", response_class=FileResponse)
+def serve_frontend():
+    html_file = PUBLIC_DIR / "client.html"
+    if not html_file.exists():
+        raise HTTPException(status_code=404, detail="Frontend not found")
+    return FileResponse(html_file)
 
-def save_clients(clients):
-    """Save clients to JSON"""
-    with open(CLIENTS_FILE, 'w') as f:
-        json.dump(clients, f, indent=2)
-
-def generate_token():
-    """Generate unique client token"""
-    return secrets.token_urlsafe(32)
-
-# ==================== API ENDPOINTS ====================
-
-@app.get("/")
+@app.get("/health")
 def health():
-    """Health check"""
     return {
         "status": "ok",
         "service": "LinkedIn Auto Connect Pro",
         "version": "2.0.0"
     }
+
+# Progress endpoint - BOTH names for compatibility
+@app.get("/api/progress/{job_id}")
+def get_progress(job_id: str):
+    if job_id not in JOBS:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JOBS[job_id]
+
+# Job Status endpoint - Frontend calls this one
+@app.get("/api/job-status/{job_id}")
+def get_job_status(job_id: str):
+    if job_id not in JOBS:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JOBS[job_id]
+
+# Download results file endpoint
+@app.get("/download/{filename}")
+def download_file(filename: str):
+    file_path = BASE_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(file_path, media_type='text/csv', filename=filename)
 
 @app.post("/api/process-csv")
 async def process_csv(
@@ -81,119 +90,86 @@ async def process_csv(
     daily_limit: int = Form(50),
     file: UploadFile = File(...)
 ):
-    """
-    Main endpoint: Client uploads CSV + credentials + daily limit
-    
-    Args:
-        email: LinkedIn email
-        password: LinkedIn password
-        daily_limit: Daily connection limit (0-150)
-        file: CSV file with LinkedIn URLs in first column
-    
-    Returns:
-        Success message with processing status
-    """
     try:
-        # Validate inputs
         if not email or not password:
             raise HTTPException(status_code=400, detail="Email and password required")
-        
-        if daily_limit < 0 or daily_limit > 150:
-            raise HTTPException(status_code=400, detail="Daily limit must be between 0 and 150")
-        
-        if not file:
-            raise HTTPException(status_code=400, detail="CSV file required")
-        
-        if not file.filename.endswith('.csv'):
-            raise HTTPException(status_code=400, detail="File must be CSV format")
-        
-        # Read uploaded CSV
+        if daily_limit < 1 or daily_limit > 150:
+            raise HTTPException(status_code=400, detail="Daily limit must be between 1-150")
+        if not file or not file.filename.endswith(".csv"):
+            raise HTTPException(status_code=400, detail="Valid CSV file required")
+
+        # Save CSV temporarily
+        file_path = UPLOADS_DIR / f"{secrets.token_hex(8)}.csv"
         contents = await file.read()
-        csv_path = UPLOADS_DIR / f"{secrets.token_hex(8)}.csv"
-        
-        with open(csv_path, 'wb') as f:
+        with open(file_path, "wb") as f:
             f.write(contents)
-        
-        # Parse CSV to validate it has LinkedIn URLs
-        try:
-            df = pd.read_csv(csv_path)
-            urls = df.iloc[:, 0].dropna().tolist()  # First column
-            
-            if len(urls) == 0:
-                raise HTTPException(status_code=400, detail="CSV has no URLs in first column")
-            
-            logger.info(f"CSV loaded with {len(urls)} URLs")
-        
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid CSV: {str(e)}")
-        
-        # Update linkedin_bot configuration
+
+        df = pd.read_csv(file_path)
+        urls = df.iloc[:, 0].dropna().tolist()
+
+        if len(urls) == 0:
+            raise HTTPException(status_code=400, detail="CSV first column has no URLs")
+
+        logger.info(f"CSV loaded: {len(urls)} URLs")
+
+        # Create a job ID
+        job_id = secrets.token_hex(6)
+
+        # Initialize job with activity log
+        JOBS[job_id] = {
+            "status": "processing",
+            "done": 0,
+            "total": len(urls),
+            "result_file": "results.csv",
+            "activity_log": [
+                f"📋 Starting to process {len(urls)} LinkedIn profiles...",
+                f"⏱️ Daily limit set to: {daily_limit} connections"
+            ]
+        }
+
+        # Configure linkedin_bot
         linkedin_bot.EMAIL = email
         linkedin_bot.PASSWORD = password
         linkedin_bot.DAILY_LIMIT = daily_limit
-        linkedin_bot.CSV_FILE = str(csv_path)
-        
-        # Run in background thread (non-blocking)
+        linkedin_bot.CSV_FILE = str(file_path)
+
+        # Pass JOB_ID and JOBS for real-time progress and activity
+        linkedin_bot.JOB_ID = job_id
+        linkedin_bot.JOBS = JOBS
+
+        # Run bot in background thread
         thread = Thread(target=linkedin_bot.main, daemon=True)
         thread.start()
-        
-        logger.info(f"Started processing {len(urls)} URLs for {email}")
-        
-        return {
+
+        logger.info(f"Started LinkedIn bot for {email} with {len(urls)} URLs (Job ID: {job_id})")
+
+        return JSONResponse({
             "status": "processing",
             "message": f"✅ Processing {len(urls)} LinkedIn profiles",
-            "urls_count": len(urls),
-            "daily_limit": daily_limit,
-            "email": email
-        }
-    
+            "job_id": job_id
+        })
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error in process_csv: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
-@app.get("/api/client/link")
-def create_client_link(company_name: str = "Client"):
-    """
-    Create a shareable client link (for admin)
-    Optional: if you want to track clients
-    """
-    token = generate_token()
-    clients = load_clients()
-    
-    clients[token] = {
-        "company": company_name,
-        "created": datetime.now().isoformat(),
-        "status": "active"
-    }
-    save_clients(clients)
-    
-    return {
-        "token": token,
-        "company": company_name,
-        "link": f"http://localhost:8000/client/{token}",
-        "message": f"Share this link: http://localhost:8000/client/{token}"
-    }
-
+# Serve client HTML (optional token)
 @app.get("/client/{token}")
 def client_page(token: str):
-    """
-    Serve client form (HTML page)
-    Token can be used for tracking if needed
-    """
-    clients = load_clients()
-    if token not in clients and token != "default":
-        # Allow access anyway, but log it
-        logger.warning(f"Unknown token: {token}")
-    
-    return FileResponse("public/client.html")
+    html_file = PUBLIC_DIR / "client.html"
+    if not html_file.exists():
+        raise HTTPException(status_code=404, detail="Frontend not found")
+    logger.info(f"Client page accessed with token: {token}")
+    return FileResponse(html_file)
 
 @app.get("/client")
 def client_page_default():
-    """Default client page (no token required)"""
-    return FileResponse("public/client.html")
+    html_file = PUBLIC_DIR / "client.html"
+    if not html_file.exists():
+        raise HTTPException(status_code=404, detail="Frontend not found")
+    return FileResponse(html_file)
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

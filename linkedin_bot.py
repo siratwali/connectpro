@@ -1,7 +1,6 @@
-# LINKEDIN AUTO CONNECT 2025 by Sirat Wali
-# By Sirat Wali (Updated & Tested: 8 December 2025)
-# Works on ALL Profiles
-# =======================================================
+"""
+LINKEDIN AUTO CONNECT 2025 by Sirat Wali - With Activity Logging
+"""
 
 import pandas as pd
 import time
@@ -18,14 +17,27 @@ import chromedriver_autoinstaller
 
 chromedriver_autoinstaller.install()
 
+# ===== Progress tracking variables for FastAPI =====
+JOB_ID = None
+JOBS = None
+
 # ==================== CONFIG ====================
-CSV_FILE = "africa_fiber_operators_with_LinkedIn_Profile.csv"
-OUTPUT_FILE = "africa_fiber_operators_linkedin_final_results.csv"
-EMAIL = "@gmail.com"  # Enter LinkedIn-EMAIL
-PASSWORD = ""            # Enter PASSWORD
-DAILY_LIMIT = 3                  # Safe: 80–120 per day
+CSV_FILE = "file.csv"
+OUTPUT_FILE = "results.csv"
+EMAIL = "@gmail.com"
+PASSWORD = ""
+DAILY_LIMIT = 3
 MAX_WAIT = 20
+
 # ================================================
+
+def log_activity(message):
+    """Add message to activity log"""
+    if JOBS and JOB_ID:
+        if "activity_log" not in JOBS[JOB_ID]:
+            JOBS[JOB_ID]["activity_log"] = []
+        JOBS[JOB_ID]["activity_log"].append(message)
+        print(f"[LOG] {message}")
 
 def get_driver():
     options = Options()
@@ -35,10 +47,8 @@ def get_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-
     service = Service(chromedriver_autoinstaller.install())
     driver = webdriver.Chrome(service=service, options=options)
-
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
     })
@@ -48,34 +58,34 @@ def random_sleep(min_sec=3, max_sec=8):
     time.sleep(random.uniform(min_sec, max_sec))
 
 def login_linkedin(driver):
+    log_activity("🔐 Logging into LinkedIn...")
     driver.get("https://www.linkedin.com/login")
     WebDriverWait(driver, 20).until(
         EC.presence_of_element_located((By.ID, "username"))
     ).send_keys(EMAIL)
     driver.find_element(By.ID, "password").send_keys(PASSWORD + Keys.RETURN)
     random_sleep(5, 9)
-    print("Login attempt finished")
+    log_activity("✅ Login attempt finished")
 
-# ==================== FINAL SEND FUNCTION (DEC 2025) ====================
 def click_send_without_note(driver, wait):
     send_xpaths = [
-        "//button[contains(@class,'artdeco-button--primary') and .//span[text()='Send']]",
-        "//button[.//span[text()='Send now']]//parent::button",
+        "//button[contains(@class,'artdeco-button--primary') and .//span[text()='Send without a note']]",
         "//button[.//span[text()='Send without a note']]//parent::button",
-        "//button[@aria-label='Send now']",
         "//button[@aria-label='Send without a note']",
         "//div[@role='dialog']//button[contains(@class,'artdeco-button--primary')]",
         "//button[contains(@class,'artdeco-modal__actionbar')]//button[1]"
     ]
+
     for xpath in send_xpaths:
         try:
             btn = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
             driver.execute_script("arguments[0].click();", btn)
-            print("Sent successfully!")
+            log_activity("✅ Sent successfully!")
             return True
         except:
             continue
-    print("Can't find Send button!")
+
+    log_activity("❌ Can't find Send button!")
     return False
 
 def send_connection_request(driver):
@@ -96,7 +106,7 @@ def send_connection_request(driver):
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
             time.sleep(0.6)
             driver.execute_script("arguments[0].click();", btn)
-            print("Direct Connect button clicked!")
+            log_activity("🔗 Direct Connect button clicked!")
             time.sleep(1)
             if click_send_without_note(driver, wait):
                 random_sleep(4, 8)
@@ -106,8 +116,7 @@ def send_connection_request(driver):
             continue
 
     # CASE 2: "More" button method
-    print("Direct Connect Not Found → Trying More button...")
-
+    log_activity("🔍 Direct Connect not found, trying More button...")
     more_xpaths = [
         "//button[.//span[text()='More']]//parent::button",
         "//button[@aria-label='More actions']",
@@ -119,13 +128,13 @@ def send_connection_request(driver):
         try:
             more_btn = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
             driver.execute_script("arguments[0].click();", more_btn)
-            print("More button click successfully!")
+            log_activity("⚙️ More button clicked successfully!")
             time.sleep(1)
             break
         except:
             continue
     else:
-        print("More button not found → Already connected or restricted profile")
+        log_activity("❌ More button not found")
         return False
 
     # Dropdown se Connect click
@@ -138,33 +147,35 @@ def send_connection_request(driver):
         try:
             connect_btn = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
             driver.execute_script("arguments[0].click();", connect_btn)
-            print("Connect clicked through dropdown menu!")
-            time.sleep(1)
+            log_activity("🔗 Connect clicked through dropdown menu!")
+            time.sleep(3)
             break
         except:
             continue
     else:
-        print("Couldn't find Connect Button in Dropdown menu!")
+        log_activity("❌ Couldn't find Connect Button in Dropdown menu")
         return False
 
-    # Final Send
     return click_send_without_note(driver, wait)
 
-# ========================= PROCESS PROFILE =========================
-def process_profile(driver, url):
-    print(f"\nOpening → {url}")
+def process_profile(driver, url, profile_number, total):
+    log_activity(f"📍 Processing profile {profile_number}/{total}...")
+    log_activity(f"🌐 Opening: {url}")
     driver.get(url)
     random_sleep(4, 8)
     driver.execute_script("window.scrollTo(0, 800);")
     time.sleep(0.6)
+
     if send_connection_request(driver):
+        log_activity(f"✅ Profile {profile_number}/{total} - Sent successfully!")
         return "Sent"
     else:
+        log_activity(f"❌ Profile {profile_number}/{total} - Failed")
         return "Failed"
 
-# ========================= MAIN =========================
 def main():
-    print("LinkedIn Auto Connect By Sirat Wali")
+    log_activity("🚀 LinkedIn Auto Connect Started by Sirat Wali")
+    
     df = pd.read_csv(CSV_FILE)
     url_col = df.columns[0]
     urls = df[url_col].dropna().str.strip().tolist()
@@ -173,31 +184,45 @@ def main():
         df["status"] = ""
 
     driver = get_driver()
+
     try:
         login_linkedin(driver)
+        
         sent = 0
-        for url in urls:
+        total_profiles = len(urls)
+
+        for index, url in enumerate(urls, 1):
             if sent >= DAILY_LIMIT:
-                print(f"Daily limit {DAILY_LIMIT} Reached!")
+                log_activity(f"⏹️ Daily limit {DAILY_LIMIT} reached!")
                 break
 
             if df.loc[df[url_col] == url, "status"].iloc[0] == "Sent":
-                print("Already sent → skip")
+                log_activity(f"⏭️ Profile {index}/{total_profiles} - Already sent, skipping")
                 continue
 
-            status = process_profile(driver, url)
+            status = process_profile(driver, url, index, total_profiles)
+
             df.loc[df[url_col] == url, "status"] = status
             df.to_csv(OUTPUT_FILE, index=False)
 
             if status == "Sent":
                 sent += 1
-                print(f"Total Sent Today: {sent}")
 
-        print(f"\nSuccessfully Task Completed! Total {sent} connections sended.")
+            # Update progress
+            if JOBS and JOB_ID:
+                JOBS[JOB_ID]["done"] = sent
+
+        log_activity(f"📊 Task Summary: Total {sent} connections sent out of {total_profiles}")
+        log_activity(f"✨ Successfully Task Completed! Total {sent} connections sent")
+
+        # Mark job completed
+        if JOBS and JOB_ID:
+            JOBS[JOB_ID]["status"] = "completed"
+            JOBS[JOB_ID]["result_file"] = OUTPUT_FILE
 
     except Exception as e:
-        print("Error Occurred:", e)
-
+        log_activity(f"❌ Error Occurred: {str(e)}")
+        print("Error Occurred", e)
     finally:
         driver.quit()
 
