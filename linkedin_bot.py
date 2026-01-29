@@ -1,8 +1,10 @@
 """
 LINKEDIN AUTO CONNECT 2025 by Sirat Wali - With Activity Logging
+Fixed Version - No persistent file storage, proper cleanup
 """
 
 import pandas as pd
+import os
 import time
 import random
 from selenium import webdriver
@@ -32,11 +34,14 @@ MAX_WAIT = 20
 # ================================================
 
 def log_activity(message):
-    """Add message to activity log"""
+    """Add message to activity log (keep only last 50 for efficiency)"""
     if JOBS and JOB_ID:
         if "activity_log" not in JOBS[JOB_ID]:
             JOBS[JOB_ID]["activity_log"] = []
         JOBS[JOB_ID]["activity_log"].append(message)
+        # Keep only last 50 logs to prevent memory issues
+        if len(JOBS[JOB_ID]["activity_log"]) > 50:
+            JOBS[JOB_ID]["activity_log"] = JOBS[JOB_ID]["activity_log"][-50:]
         print(f"[LOG] {message}")
 
 def get_driver():
@@ -65,6 +70,7 @@ def login_linkedin(driver):
     ).send_keys(EMAIL)
     driver.find_element(By.ID, "password").send_keys(PASSWORD + Keys.RETURN)
     random_sleep(5, 9)
+    input("Complete any verification (2FA, email, phone) → Press Enter when on homepage...")
     log_activity("✅ Login attempt finished")
 
 def click_send_without_note(driver, wait):
@@ -175,7 +181,9 @@ def process_profile(driver, url, profile_number, total):
 
 def main():
     log_activity("🚀 LinkedIn Auto Connect Started by Sirat Wali")
+    log_activity(f"⚙️ Configuration: Daily Limit = {DAILY_LIMIT}")
     
+    # Read fresh CSV file (no checking for existing results.csv)
     df = pd.read_csv(CSV_FILE)
     url_col = df.columns[0]
     urls = df[url_col].dropna().str.strip().tolist()
@@ -183,27 +191,34 @@ def main():
     if "status" not in df.columns:
         df["status"] = ""
 
-    driver = get_driver()
+    # Validate URLs count vs daily limit
+    total_profiles = len(urls)
+    if total_profiles < DAILY_LIMIT:
+        log_activity(f"⚠️ Warning: CSV has {total_profiles} URLs but daily limit is {DAILY_LIMIT}")
+        log_activity(f"📌 Will process all {total_profiles} available profiles")
 
+    driver = None
     try:
+        driver = get_driver()
         login_linkedin(driver)
         
         sent = 0
-        total_profiles = len(urls)
 
         for index, url in enumerate(urls, 1):
             if sent >= DAILY_LIMIT:
                 log_activity(f"⏹️ Daily limit {DAILY_LIMIT} reached!")
                 break
 
-            if df.loc[df[url_col] == url, "status"].iloc[0] == "Sent":
-                log_activity(f"⏭️ Profile {index}/{total_profiles} - Already sent, skipping")
-                continue
-
+            # Don't check previous status - treat each run as fresh
             status = process_profile(driver, url, index, total_profiles)
 
             df.loc[df[url_col] == url, "status"] = status
-            df.to_csv(OUTPUT_FILE, index=False)
+            
+            # Save results incrementally
+            try:
+                df.to_csv(OUTPUT_FILE, index=False)
+            except Exception as save_error:
+                log_activity(f"⚠️ Could not save results: {str(save_error)}")
 
             if status == "Sent":
                 sent += 1
@@ -222,9 +237,18 @@ def main():
 
     except Exception as e:
         log_activity(f"❌ Error Occurred: {str(e)}")
+
+        if JOBS and JOB_ID:
+            JOBS[JOB_ID]["status"] = "failed"
+            JOBS[JOB_ID]["error"] = str(e)
+            JOBS[JOB_ID]["result_file"] = OUTPUT_FILE
+
         print("Error Occurred", e)
+
     finally:
-        driver.quit()
+        if driver:
+            driver.quit()
+            log_activity("🔌 Browser closed")
 
 if __name__ == "__main__":
     main()
