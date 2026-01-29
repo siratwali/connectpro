@@ -1,5 +1,6 @@
 """
 LinkedIn Auto Connect Pro - FastAPI Backend with Activity Logging
+Fixed Version - Proper file cleanup and session management
 """
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -12,6 +13,7 @@ import uvicorn
 import secrets
 import logging
 import linkedin_bot
+import os
 import time
 
 # Setup logging
@@ -31,7 +33,7 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# CORS - allow all origins
+# CORS - allow all origins (optimized)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,13 +43,52 @@ app.add_middleware(
 )
 
 # ==================== JOBS STORAGE ====================
-# Track multiple CSV processing tasks with activity log
+# In-memory storage for fast access
 JOBS = {}
+
+# ==================== HELPER FUNCTIONS ====================
+def cleanup_files(csv_path: str = None, result_file: str = None):
+    """Delete uploaded CSV and result files"""
+    try:
+        if csv_path and os.path.exists(csv_path):
+            os.remove(csv_path)
+            logger.info(f"Deleted CSV file: {csv_path}")
+        
+        if result_file and os.path.exists(result_file):
+            os.remove(result_file)
+            logger.info(f"Deleted result file: {result_file}")
+    except Exception as e:
+        logger.error(f"Error cleaning up files: {str(e)}")
+
+def cleanup_old_uploads():
+    """Clean all files in uploads directory"""
+    try:
+        for file in UPLOADS_DIR.glob("*"):
+            if file.is_file():
+                os.remove(file)
+                logger.info(f"Cleaned up old upload: {file}")
+    except Exception as e:
+        logger.error(f"Error cleaning uploads directory: {str(e)}")
 
 # ==================== ENDPOINTS ====================
 @app.get("/ping")
 def ping():
     return {"status": "alive"}
+
+@app.on_event("startup")
+def reset_jobs():
+    """Reset jobs and clean up old files on startup"""
+    global JOBS
+    JOBS = {}
+    cleanup_old_uploads()
+    # Clean any existing result files
+    try:
+        if os.path.exists("results.csv"):
+            os.remove("results.csv")
+        if os.path.exists("file.csv"):
+            os.remove("file.csv")
+    except Exception as e:
+        logger.error(f"Error cleaning result files: {str(e)}")
 
 @app.get("/", response_class=FileResponse)
 def serve_frontend():
@@ -64,19 +105,26 @@ def health():
         "version": "2.0.0"
     }
 
-# Progress endpoint - BOTH names for compatibility
-@app.get("/api/progress/{job_id}")
-def get_progress(job_id: str):
-    if job_id not in JOBS:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return JOBS[job_id]
-
-# Job Status endpoint - Frontend calls this one
+# Job Status endpoint - Fast response with minimal data
 @app.get("/api/job-status/{job_id}")
 def get_job_status(job_id: str):
     if job_id not in JOBS:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return JOBS[job_id]
+        return JSONResponse(
+            status_code=404,
+            content={"status": "not_found", "done": 0, "total": 0}
+        )
+    
+    job = JOBS[job_id]
+    
+    # Return only essential data for faster response
+    return {
+        "status": job.get("status", "processing"),
+        "done": job.get("done", 0),
+        "total": job.get("total", 0),
+        "result_file": job.get("result_file", ""),
+        "activity_log": job.get("activity_log", [])[-10:],  # Only last 10 logs for speed
+        "error": job.get("error", None)
+    }
 
 # Download results file endpoint
 @app.get("/download/{filename}")
@@ -84,79 +132,97 @@ def download_file(filename: str):
     file_path = BASE_DIR / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
+    
+    # Schedule file cleanup after download (give 5 seconds for download to complete)
+    def delayed_cleanup():
+        time.sleep(5)
+        cleanup_files(result_file=str(file_path))
+    
+    Thread(target=delayed_cleanup, daemon=True).start()
+    
     return FileResponse(file_path, media_type='text/csv', filename=filename)
 
 @app.post("/api/process-csv")
 async def process_csv(
     email: str = Form(...),
     password: str = Form(...),
-    daily_limit: int = Form(50),
+    dailylimit: int = Form(...),
     file: UploadFile = File(...)
 ):
     try:
+        # Quick validation
         if not email or not password:
-            raise HTTPException(status_code=400, detail="Email and password required")
-        if daily_limit < 1 or daily_limit > 150:
-            raise HTTPException(status_code=400, detail="Daily limit must be between 1-150")
+            return JSONResponse(status_code=400, content={"detail": "Email and password required"})
+        
+        if dailylimit < 1 or dailylimit > 150:
+            return JSONResponse(status_code=400, content={"detail": f"Daily limit must be between 1-150"})
+        
         if not file or not file.filename.endswith(".csv"):
-            raise HTTPException(status_code=400, detail="Valid CSV file required")
+            return JSONResponse(status_code=400, content={"detail": "Valid CSV file required"})
 
-        # Save CSV temporarily
+        # Clean old files
+        cleanup_old_uploads()
+        if os.path.exists("results.csv"):
+            os.remove("results.csv")
+
+        # Save CSV
         file_path = UPLOADS_DIR / f"{secrets.token_hex(8)}.csv"
         contents = await file.read()
         with open(file_path, "wb") as f:
             f.write(contents)
 
+        # Quick CSV validation
         df = pd.read_csv(file_path)
         urls = df.iloc[:, 0].dropna().tolist()
 
         if len(urls) == 0:
-            raise HTTPException(status_code=400, detail="CSV first column has no URLs")
+            cleanup_files(csv_path=str(file_path))
+            return JSONResponse(status_code=400, content={"detail": "CSV has no URLs"})
 
-        logger.info(f"CSV loaded: {len(urls)} URLs")
-
-        # Create a job ID
+        actual_limit = min(dailylimit, len(urls))
         job_id = secrets.token_hex(6)
 
-        # Initialize job with activity log
+        # Initialize job with minimal data
         JOBS[job_id] = {
             "status": "processing",
             "done": 0,
             "total": len(urls),
             "result_file": "results.csv",
+            "csv_path": str(file_path),
             "activity_log": [
-                f"📋 Starting to process {len(urls)} LinkedIn profiles...",
-                f"⏱️ Daily limit set to: {daily_limit} connections"
+                f"📋 Processing {len(urls)} LinkedIn profiles",
+                f"⏱️ Daily limit: {actual_limit}"
             ]
         }
 
-        # Configure linkedin_bot
+        # Configure bot
         linkedin_bot.EMAIL = email
         linkedin_bot.PASSWORD = password
-        linkedin_bot.DAILY_LIMIT = daily_limit
+        linkedin_bot.DAILY_LIMIT = actual_limit
         linkedin_bot.CSV_FILE = str(file_path)
-
-        # Pass JOB_ID and JOBS for real-time progress and activity
+        linkedin_bot.OUTPUT_FILE = "results.csv"
         linkedin_bot.JOB_ID = job_id
         linkedin_bot.JOBS = JOBS
 
-        # Run bot in background thread
-        thread = Thread(target=linkedin_bot.main, daemon=True)
-        thread.start()
+        # Run bot with cleanup
+        def run_bot_with_cleanup():
+            try:
+                linkedin_bot.main()
+            finally:
+                time.sleep(2)
+                cleanup_files(csv_path=str(file_path))
 
-        logger.info(f"Started LinkedIn bot for {email} with {len(urls)} URLs (Job ID: {job_id})")
+        Thread(target=run_bot_with_cleanup, daemon=True).start()
 
         return JSONResponse({
             "status": "processing",
-            "message": f"✅ Processing {len(urls)} LinkedIn profiles",
+            "message": f"Processing {len(urls)} profiles",
             "job_id": job_id
         })
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Error in process_csv: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+        logger.error(f"Error: {str(e)}")
+        return JSONResponse(status_code=500, content={"detail": f"Server error: {str(e)}"})
 
 # Serve client HTML (optional token)
 @app.get("/client/{token}")
@@ -175,4 +241,12 @@ def client_page_default():
     return FileResponse(html_file)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    # Optimized server configuration
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        log_level="warning",  # Reduce logging overhead
+        access_log=False,     # Disable access logs for speed
+        workers=1             # Single worker to maintain shared state
+    )
