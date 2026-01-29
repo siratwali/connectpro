@@ -507,6 +507,10 @@
             <a href="#" id="downloadLink" class="download-link">
                     📥 Click Here to Download Results
                 </a>
+
+            <button class="btn-reset" id="resetAfterComplete" style="display: none; margin-top: 15px; width: 100%;" onclick="resetForm()">
+                🔄 Start New Task
+            </button>
         </div>
     </div>
 
@@ -567,8 +571,8 @@
                 return;
             }
 
-            if (dailyLimit < 0 || dailyLimit > 150) {
-                showStatus("Daily limit must be between 0 and 150", "error");
+            if (dailyLimit < 1 || dailyLimit > 150) {
+                showStatus("Daily limit must be between 1 and 150", "error");
                 return;
             }
 
@@ -581,14 +585,18 @@
 
                 document.getElementById("form").classList.add("hidden");
                 document.getElementById("progressSection").classList.add("show");
-
-                // Clear activity log
                 document.getElementById("activityLog").innerHTML = "";
+
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout for upload
 
                 const response = await fetch(`${API_URL}/api/process-csv`, {
                     method: "POST",
-                    body: formData
+                    body: formData,
+                    signal: controller.signal
                 });
+                
+                clearTimeout(timeoutId);
 
                 const data = await response.json();
 
@@ -598,7 +606,11 @@
                     showError(data.detail || "Error processing request");
                 }
             } catch (error) {
-                showError("Connection error: " + error.message);
+                if (error.name === 'AbortError') {
+                    showError("Upload timeout. Please try again with a smaller file.");
+                } else {
+                    showError("Connection error: " + error.message);
+                }
             }
         }
 
@@ -615,15 +627,39 @@
         }
 
         function resetForm() {
+            // Clear form inputs
             document.getElementById("email").value = "";
             document.getElementById("password").value = "";
             document.getElementById("dailyLimit").value = 50;
             document.getElementById("sliderValue").textContent = 50;
             document.getElementById("csvFile").value = "";
             document.getElementById("fileName").textContent = "";
+            
+            // Hide status message
             document.getElementById("statusMessage").classList.remove("show");
+            
+            // Show form and hide progress section
             document.getElementById("form").classList.remove("hidden");
             document.getElementById("progressSection").classList.remove("show");
+            
+            // Reset progress section
+            document.getElementById("activityLog").innerHTML = '<div class="activity-log-item info">Starting activity log...</div>';
+            document.getElementById("progressFill").style.width = "0%";
+            document.getElementById("progressFill").textContent = "0%";
+            document.getElementById("progressText").textContent = "Initializing...";
+            document.getElementById("progressInfo").textContent = "Processing your LinkedIn profiles...";
+            
+            // Hide completion elements
+            document.getElementById("completionMessage").classList.remove("show");
+            document.getElementById("backendInfo").classList.remove("show");
+            document.getElementById("downloadLink").classList.remove("show");
+            document.getElementById("resetAfterComplete").style.display = "none";
+            
+            // Show spinner again
+            document.getElementById("spinner").classList.remove("hidden");
+            
+            // Scroll to top
+            window.scrollTo({ top: 0, behavior: 'smooth' });
         }
 
         function addActivityLog(message) {
@@ -647,12 +683,32 @@
             logContainer.scrollTop = logContainer.scrollHeight;
         }
 
-        // Track progress with activity log
+        // Track progress with activity log - Optimized with longer polling and timeout handling
         function trackProgress(jobId) {
+            let consecutiveErrors = 0;
+            const maxErrors = 5;
+            
             const interval = setInterval(async() => {
                 try {
-                    const res = await fetch(`${API_URL}/api/job-status/${jobId}`);
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+                    
+                    const res = await fetch(`${API_URL}/api/job-status/${jobId}`, {
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    
+                    if (!res.ok) {
+                        consecutiveErrors++;
+                        if (consecutiveErrors >= maxErrors) {
+                            clearInterval(interval);
+                            showError("Server not responding. Please check status manually.");
+                        }
+                        return;
+                    }
+                    
                     const data = await res.json();
+                    consecutiveErrors = 0; // Reset on success
 
                     const done = data.done || 0;
                     const total = data.total || 1;
@@ -663,52 +719,55 @@
                     document.getElementById("progressFill").textContent = percent + "%";
                     document.getElementById("progressText").textContent = `Processing... (${done}/${total} profiles sent)`;
 
-                    // Update activity log
+                    // Update activity log (only new entries)
                     if (data.activity_log) {
                         const logContainer = document.getElementById("activityLog");
-                        const currentLogs = logContainer.querySelectorAll(".activity-log-item").length;
-
-                        // Add new logs
-                        for (let i = currentLogs; i < data.activity_log.length; i++) {
-                            addActivityLog(data.activity_log[i]);
-                        }
+                        // Clear and rebuild to avoid duplicates
+                        logContainer.innerHTML = "";
+                        data.activity_log.forEach(log => {
+                            addActivityLog(log);
+                        });
                     }
 
                     // Check if completed
                     if (data.status === "completed") {
                         clearInterval(interval);
-
-                        // Hide spinner
                         document.getElementById("spinner").classList.add("hidden");
                         document.getElementById("progressInfo").textContent = "";
-
-                        // Update progress to 100%
                         document.getElementById("progressFill").style.width = "100%";
                         document.getElementById("progressFill").textContent = "100%";
                         document.getElementById("progressText").textContent = `✅ All profiles processed! Total: ${done}/${total}`;
-
-                        // Show completion message
                         document.getElementById("completionMessage").classList.add("show");
-
-                        // Show backend info
                         document.getElementById("backendDetails").innerHTML = `
                                 <p><strong>📊 Total Sent:</strong> ${done} connections</p>
                                 <p><strong>📁 Result File:</strong> ${data.result_file}</p>
                                 <p><strong>✨ Status:</strong> ${data.status}</p>
-                                <p><strong>🕐 Timestamp:</strong> ${new Date().toLocaleString()}</p>
                             `;
                         document.getElementById("backendInfo").classList.add("show");
-
-                        // Show download link
                         const downloadLink = document.getElementById("downloadLink");
                         downloadLink.href = `/download/${data.result_file}`;
                         downloadLink.download = data.result_file;
                         downloadLink.classList.add("show");
+                        document.getElementById("resetAfterComplete").style.display = "block";
+                    }
+                    
+                    if (data.status === "failed") {
+                        clearInterval(interval);
+                        showError("Processing failed: " + (data.error || "Unknown error"));
                     }
                 } catch (e) {
-                    console.error("Polling error:", e);
+                    if (e.name === 'AbortError') {
+                        console.log("Request timeout, retrying...");
+                    } else {
+                        console.error("Polling error:", e);
+                    }
+                    consecutiveErrors++;
+                    if (consecutiveErrors >= maxErrors) {
+                        clearInterval(interval);
+                        showError("Connection lost. Task may still be running on server.");
+                    }
                 }
-            }, 1000);
+            }, 2000); // Poll every 2 seconds instead of 1 second
         }
     </script>
 </body>
